@@ -1,0 +1,81 @@
+'use strict';
+
+const TIMEOUT = 20000;
+const BASE = 'https://multas.mda.gob.ar';
+
+function clean(p) { return p.replace(/\s/g, '').toUpperCase(); }
+
+async function consultarAvellaneda(browser, tipo, valor) {
+  if (tipo === 'dni') {
+    return { estado: 'no_soportado', infracciones: [], mensaje: 'Avellaneda no permite consulta por DNI.' };
+  }
+
+  const page = await browser.newPage();
+  await page.setViewport({ width: 1280, height: 800 });
+
+  // Ignorar errores de SSL del certificado de MDA
+  await page.setBypassCSP(true);
+
+  try {
+    await page.goto(`${BASE}/`, {
+      waitUntil: 'networkidle2',
+      timeout: TIMEOUT,
+      // Puppeteer acepta certificados inválidos por defecto en modo headless
+    });
+
+    // Esperar formulario
+    const inputSel = 'input[name*="dominio"], input[name*="patente"], input[name*="placa"], input[type="text"]';
+    const input = await page.waitForSelector(inputSel, { timeout: 10000 });
+    await input.click({ clickCount: 3 });
+    await input.type(clean(valor), { delay: 60 });
+
+    // Enviar
+    const boton = await page.$('button[type="submit"], input[type="submit"]');
+    if (boton) {
+      await boton.click();
+    } else {
+      await page.keyboard.press('Enter');
+    }
+
+    // Esperar resultados
+    await page.waitForFunction(() => {
+      const t = document.body.innerText.toLowerCase();
+      return t.includes('multa') || t.includes('infraccion') || t.includes('acta') ||
+             t.includes('no se encontr') || t.includes('sin result') || t.includes('no registra');
+    }, { timeout: 15000 }).catch(() => {});
+
+    const resultado = await page.evaluate(() => {
+      const infracciones = [];
+      document.querySelectorAll('table tbody tr').forEach(fila => {
+        const celdas = fila.querySelectorAll('td');
+        if (celdas.length >= 2) {
+          const textos = Array.from(celdas).map(c => c.innerText.trim());
+          if (textos.some(t => t.length > 1)) {
+            infracciones.push({
+              acta:   textos[0] || '—',
+              fecha:  textos[1] || '—',
+              lugar:  textos[2] || '—',
+              monto:  textos[3] || '—',
+              estado: textos[4] || '—',
+            });
+          }
+        }
+      });
+      const texto = document.body.innerText.toLowerCase();
+      const sinInf = texto.includes('no se encontr') || texto.includes('sin result') ||
+                     texto.includes('no registra') || texto.includes('no tiene');
+      return { infracciones, sinInf };
+    });
+
+    return {
+      estado: resultado.infracciones.length > 0 ? 'con_infracciones' : resultado.sinInf ? 'sin_infracciones' : 'sin_datos',
+      infracciones: resultado.infracciones,
+      urlConsulta: `${BASE}/`,
+    };
+
+  } finally {
+    await page.close();
+  }
+}
+
+module.exports = { consultarAvellaneda };
